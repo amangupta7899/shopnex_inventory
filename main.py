@@ -1,9 +1,17 @@
+import uuid
+from datetime import datetime
+
 from fastapi import FastAPI, Form
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, RedirectResponse
 from database import SessionLocal
 from models.product import Product
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+import os
 
 app = FastAPI()
+app.mount("/invoices", StaticFiles(directory="invoices"), name="invoices")
 
 # --------------------
 # SIMPLE LOGIN FLAG
@@ -57,13 +65,22 @@ def home():
     for p in products:
         status = "In Stock" if p.qty > 0 else "OUT OF STOCK"
         rows += f"""
-        <tr>
-            <td>{p.name}</td>
-            <td>{p.qty}</td>
-            <td>₹ {p.price}</td>
-            <td>{status}</td>
-        </tr>
-        """
+<tr>
+    <td>{p.name}</td>
+    <td>{p.qty}</td>
+    <td>₹ {p.price}</td>
+    <td>{status}</td>
+    <td>
+        <form method="post" action="/delete/{p.id}"
+              onsubmit="return confirm('Are you sure you want to delete this product?');">
+            <button style="background:red;color:white;padding:5px 10px;border:none;">
+                Delete
+            </button>
+        </form>
+    </td>
+</tr>
+"""
+
 
     db.close()
 
@@ -85,6 +102,8 @@ def home():
 
     <br>
     <a href="/billing">➡ Billing</a>
+<a href="/logout" style="color:red;">🚪 Logout</a>
+
     """
 
 
@@ -104,6 +123,20 @@ def add_product(name: str = Form(...), qty: int = Form(...), price: float = Form
 
     return RedirectResponse("/", status_code=303)
 
+@app.post("/delete/{product_id}")
+def delete_product(product_id: int):
+    if not logged_in:
+        return RedirectResponse("/login", status_code=303)
+
+    db = get_db()
+    product = db.query(Product).filter(Product.id == product_id).first()
+
+    if product:
+        db.delete(product)
+        db.commit()
+
+    db.close()
+    return RedirectResponse("/", status_code=303)
 
 # --------------------
 # BILLING PAGE
@@ -137,6 +170,8 @@ def billing():
 
     <br>
     <a href="/">⬅ Back</a>
+    <a href="/logout" style="color:red;">🚪 Logout</a>
+
     """
 
 
@@ -163,6 +198,8 @@ def generate_bill(product_id: int = Form(...), sell_qty: int = Form(...)):
     total = sell_qty * product.price
     gst = total * 0.18
     grand_total = total + gst
+    
+    bill_no = f"BILL-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
 
     product_name = product.name
     product_price = product.price
@@ -171,7 +208,30 @@ def generate_bill(product_id: int = Form(...), sell_qty: int = Form(...)):
     db.commit()
     db.close()
 
+# --------------------
+# CREATE PDF INVOICE
+# --------------------
+    if not os.path.exists("invoices"):
+     os.makedirs("invoices")
+
+    file_name = f"invoices/{bill_no}.pdf"
+    c = canvas.Canvas(file_name, pagesize=A4)
+    c.drawString(50, 800, "GST INVOICE")
+    c.drawString(50, 780, f"Bill No: {bill_no}")
+    c.drawString(50, 760, f"Date: {datetime.now().strftime('%d-%m-%Y %I:%M %p')}")
+    c.drawString(50, 770, f"Product: {product_name}")
+    c.drawString(50, 750, f"Quantity: {sell_qty}")
+    c.drawString(50, 730, f"Rate: ₹ {product_price}")
+    c.drawString(50, 710, f"Subtotal: ₹ {total:.2f}")
+    c.drawString(50, 690, f"GST (18%): ₹ {gst:.2f}")
+    c.drawString(50, 670, f"Grand Total: ₹ {grand_total:.2f}")
+
+    c.save()
+
     return f"""
+    <p><b>Bill No:</b> {bill_no}</p>
+<p><b>Date:</b> {datetime.now().strftime('%d-%m-%Y %I:%M %p')}</p>
+
     <h1>GST BILL</h1>
     <p>Product: {product_name}</p>
     <p>Quantity: {sell_qty}</p>
@@ -181,6 +241,17 @@ def generate_bill(product_id: int = Form(...), sell_qty: int = Form(...)):
     <p>GST (18%): ₹ {gst:.2f}</p>
 
     <h2>Grand Total: ₹ {grand_total:.2f}</h2>
+    <p>
+    <a href="/invoices/{bill_no}.pdf" target="_blank">
+    ⬇ Download Bill PDF
+</a>
+
+</p>
 
     <a href="/">⬅ Back to Inventory</a>
     """
+@app.get("/logout")
+def logout():
+    global logged_in
+    logged_in = False
+    return RedirectResponse("/login", status_code=303)
